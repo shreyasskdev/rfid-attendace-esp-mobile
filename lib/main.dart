@@ -1,122 +1,176 @@
+import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
-void main() {
-  runApp(const MyApp());
-}
+void main() => runApp(
+  const MaterialApp(home: AttendanceApp(), debugShowCheckedModeBanner: false),
+);
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
-
-  // This widget is the root of your application.
+class AttendanceApp extends StatefulWidget {
+  const AttendanceApp({super.key});
   @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
-      ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
-    );
-  }
+  State<AttendanceApp> createState() => _AttendanceAppState();
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
+class _AttendanceAppState extends State<AttendanceApp> {
+  BluetoothDevice? espDevice;
+  BluetoothCharacteristic? writeChar;
+  List<String> liveLogs = [];
+  List<String> historyLogs = [];
+  String detectedUID = "Scan a card...";
+  final TextEditingController nameC = TextEditingController();
+  final TextEditingController rollC = TextEditingController();
 
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
+  final String serviceUuid = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+  final String notifyUuid = "6d680001-70b3-4000-8000-000000000000";
+  final String writeUuid = "6d680002-70b3-4000-8000-000000000000";
 
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
-
-  @override
-  State<MyHomePage> createState() => _MyHomePageState();
-}
-
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
-
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+  void connect() async {
+    FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
+    FlutterBluePlus.scanResults.listen((results) {
+      for (ScanResult r in results) {
+        if (r.device.platformName == "ESP32_Attendance") {
+          r.device.connect(license: License.free).then((_) async {
+            List<BluetoothService> services = await r.device.discoverServices();
+            for (var s in services) {
+              if (s.uuid.toString() == serviceUuid) {
+                for (var c in s.characteristics) {
+                  if (c.uuid.toString() == notifyUuid) {
+                    await c.setNotifyValue(true);
+                    c.onValueReceived.listen(handleData);
+                  }
+                  if (c.uuid.toString() == writeUuid) writeChar = c;
+                }
+              }
+            }
+            // SYNC TIME AUTOMATICALLY
+            String timeCmd =
+                "TIME:${DateTime.now().millisecondsSinceEpoch ~/ 1000}";
+            writeChar?.write(utf8.encode(timeCmd));
+            setState(() => espDevice = r.device);
+          });
+        }
+      }
     });
   }
 
+  void handleData(List<int> data) {
+    String msg = utf8.decode(data);
+    if (msg.startsWith("NEW_UID:"))
+      setState(() => detectedUID = msg.substring(8));
+    else if (msg == "END_HISTORY")
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text("Sync Complete")));
+    else if (msg.startsWith("PRESENT:"))
+      setState(() => liveLogs.insert(0, "Live: ${msg.substring(8)}"));
+    else
+      setState(() => historyLogs.insert(0, msg)); // Full history lines
+  }
+
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
-    return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text("RFID Attendance"),
+          backgroundColor: Colors.blueGrey[900],
+          foregroundColor: Colors.white,
+          bottom: const TabBar(
+            tabs: [
+              Tab(text: "Register & Live"),
+              Tab(text: "Full History"),
+            ],
+          ),
+        ),
+        body: TabBarView(children: [_buildRegisterTab(), _buildHistoryTab()]),
       ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
+    );
+  }
+
+  Widget _buildRegisterTab() {
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        children: [
+          if (espDevice == null)
+            ElevatedButton(
+              onPressed: connect,
+              child: const Text("Connect to System"),
+            ),
+          Text(
+            "UID: $detectedUID",
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: 18,
+              color: Colors.blue,
+            ),
+          ),
+          TextField(
+            controller: nameC,
+            decoration: const InputDecoration(labelText: "Student Name"),
+          ),
+          TextField(
+            controller: rollC,
+            decoration: const InputDecoration(labelText: "Roll No"),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              writeChar?.write(
+                utf8.encode("ADD:${detectedUID},${nameC.text},${rollC.text}"),
+              );
+              nameC.clear();
+              rollC.clear();
+            },
+            child: const Text("Register Student"),
+          ),
+          const Divider(),
+          const Text("Live Scans:"),
+          Expanded(
+            child: ListView(
+              children: liveLogs.map((e) => ListTile(title: Text(e))).toList(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHistoryTab() {
+    return Column(
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
           children: [
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+            ElevatedButton(
+              onPressed: () {
+                setState(() => historyLogs.clear());
+                writeChar?.write(utf8.encode("GET_HISTORY"));
+              },
+              child: const Text("Sync History from ESP32"),
+            ),
+            ElevatedButton(
+              onPressed: () => writeChar?.write(utf8.encode("CLEAR_LOGS")),
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+              child: const Text(
+                "Clear ESP32 Logs",
+                style: TextStyle(color: Colors.white),
+              ),
             ),
           ],
         ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ),
+        Expanded(
+          child: ListView.builder(
+            itemCount: historyLogs.length,
+            itemBuilder: (c, i) => ListTile(
+              leading: const Icon(Icons.history),
+              title: Text(historyLogs[i]),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
