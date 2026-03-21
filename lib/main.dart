@@ -1,12 +1,69 @@
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:intl/intl.dart';
 
-void main() => runApp(
-  const MaterialApp(home: AttendanceApp(), debugShowCheckedModeBanner: false),
-);
+// --- Global Theme & Signal Management ---
+ValueNotifier<String?> scanSignal = ValueNotifier(null);
+ValueNotifier<ThemeMode> themeNotifier = ValueNotifier(ThemeMode.system);
+
+enum ThemeMode { system, light, dark }
+
+void main() => runApp(const ZincApp());
+
+class ZincColors {
+  static const zinc50 = Color(0xFFFAFAFA);
+  static const zinc100 = Color(0xFFF4F4F5);
+  static const zinc200 = Color(0xFFE4E4E7);
+  static const zinc300 = Color(0xFFD4D4D8);
+  static const zinc400 = Color(0xFFA1A1AA);
+  static const zinc500 = Color(0xFF71717A);
+  static const zinc800 = Color(0xFF27272A);
+  static const zinc900 = Color(0xFF18181B);
+  static const zinc950 = Color(0xFF09090B);
+
+  static Brightness getBrightness(BuildContext context) {
+    if (themeNotifier.value == ThemeMode.light) return Brightness.light;
+    if (themeNotifier.value == ThemeMode.dark) return Brightness.dark;
+    return MediaQuery.platformBrightnessOf(context);
+  }
+
+  static Color background(BuildContext context) =>
+      getBrightness(context) == Brightness.dark ? zinc950 : zinc50;
+  static Color surface(BuildContext context) =>
+      getBrightness(context) == Brightness.dark
+      ? zinc900
+      : const Color(0xFFFFFFFF);
+  static Color border(BuildContext context) =>
+      getBrightness(context) == Brightness.dark ? zinc800 : zinc200;
+  static Color text(BuildContext context) =>
+      getBrightness(context) == Brightness.dark ? zinc50 : zinc950;
+  static Color mutedText(BuildContext context) =>
+      getBrightness(context) == Brightness.dark ? zinc400 : zinc500;
+}
+
+class ZincApp extends StatelessWidget {
+  const ZincApp({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: themeNotifier,
+      builder: (context, currentMode, child) {
+        return CupertinoApp(
+          theme: CupertinoThemeData(
+            brightness: currentMode == ThemeMode.light
+                ? Brightness.light
+                : (currentMode == ThemeMode.dark ? Brightness.dark : null),
+            primaryColor: CupertinoColors.label,
+          ),
+          home: const AttendanceApp(),
+          debugShowCheckedModeBanner: false,
+        );
+      },
+    );
+  }
+}
 
 class Student {
   String uid, name, roll;
@@ -24,10 +81,12 @@ class _AttendanceAppState extends State<AttendanceApp> {
   BluetoothCharacteristic? writeChar;
   Map<String, Student> allStudents = {};
   Set<String> presentToday = {};
-  List<String> historyLogs = [];
-  bool isAttOpen = true, isListeningForCard = false, isConnecting = false;
-  String detectedUID = "Scan a card...";
-  final nameC = TextEditingController(), rollC = TextEditingController();
+  List<Student> historyResults = [];
+  bool isAttOpen = true, isConnecting = false, isHistorySyncing = false;
+  String detectedUID = "---";
+
+  final TextEditingController nameC = TextEditingController();
+  final TextEditingController rollC = TextEditingController();
 
   void connect() async {
     setState(() => isConnecting = true);
@@ -71,23 +130,8 @@ class _AttendanceAppState extends State<AttendanceApp> {
     String msg = utf8.decode(data).trim();
     if (msg.startsWith("NEW_UID:")) {
       String uid = msg.substring(8);
-      if (isListeningForCard) {
-        setState(() {
-          detectedUID = uid;
-          isListeningForCard = false;
-        });
-        Navigator.pop(context);
-      } else if (isAttOpen) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text("Unknown Card: $uid"),
-            backgroundColor: Colors.orange,
-          ),
-        );
-      }
-      // If NOT in session and NOT listening, we just ignore it silently.
-    } else if (msg.startsWith("INFO:")) {
-      // Silently ignore registered cards in standby mode
+      detectedUID = uid;
+      scanSignal.value = uid;
     } else if (msg.startsWith("LIVE:") || msg.startsWith("TOD:")) {
       if (!msg.contains("END"))
         setState(() => presentToday.add(msg.substring(msg.indexOf(':') + 1)));
@@ -99,154 +143,466 @@ class _AttendanceAppState extends State<AttendanceApp> {
     } else if (msg.startsWith("STAT:")) {
       setState(() => isAttOpen = msg.contains("OPEN"));
     } else if (msg.startsWith("HIS:")) {
-      if (msg != "HIS:END") setState(() => historyLogs.add(msg.substring(4)));
+      if (msg == "HIS:END") {
+        setState(() => isHistorySyncing = false);
+        return;
+      }
+      String uid = msg.substring(4);
+      if (allStudents.containsKey(uid))
+        setState(() => historyResults.add(allStudents[uid]!));
     }
-  }
-
-  void _showScanDialog() {
-    writeChar?.write(utf8.encode("PREP_REG"));
-    setState(() {
-      detectedUID = "Waiting...";
-      isListeningForCard = true;
-    });
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) =>
-          _PulseDialog(onCancel: () => isListeningForCard = false),
-    );
   }
 
   @override
   Widget build(BuildContext context) {
-    return DefaultTabController(
-      length: 3,
-      child: Scaffold(
-        appBar: AppBar(
-          title: const Text("RFID Attendance Pro"),
-          backgroundColor: Colors.indigo[900],
-          foregroundColor: Colors.white,
-          bottom: const TabBar(
-            tabs: [
-              Tab(text: "Today"),
-              Tab(text: "Students"),
-              Tab(text: "History"),
-            ],
-          ),
-          actions: [
-            if (dev != null)
-              IconButton(
-                icon: const Icon(Icons.sync),
-                onPressed: syncEverything,
-              ),
-          ],
+    return CupertinoTabScaffold(
+      tabBar: CupertinoTabBar(
+        backgroundColor: ZincColors.surface(context),
+        activeColor: ZincColors.text(context),
+        border: Border(
+          top: BorderSide(color: ZincColors.border(context), width: 0.5),
         ),
-        body: dev == null
-            ? Center(
-                child: isConnecting
-                    ? const CircularProgressIndicator()
-                    : ElevatedButton(
-                        onPressed: connect,
-                        child: const Text("Connect System"),
-                      ),
-              )
-            : TabBarView(children: [_todayTab(), _manageTab(), _historyTab()]),
+        items: const [
+          BottomNavigationBarItem(
+            icon: Icon(CupertinoIcons.square_list),
+            label: "Live",
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(CupertinoIcons.person_2),
+            label: "Directory",
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(CupertinoIcons.archivebox),
+            label: "History",
+          ),
+        ],
+      ),
+      tabBuilder: (context, i) {
+        return CupertinoPageScaffold(
+          backgroundColor: ZincColors.background(context),
+          navigationBar: CupertinoNavigationBar(
+            backgroundColor: ZincColors.surface(context).withOpacity(0.9),
+            border: Border(
+              bottom: BorderSide(color: ZincColors.border(context)),
+            ),
+            leading: CupertinoButton(
+              padding: EdgeInsets.zero,
+              child: Icon(
+                ZincColors.getBrightness(context) == Brightness.dark
+                    ? CupertinoIcons.moon_fill
+                    : CupertinoIcons.sun_max_fill,
+                size: 20,
+                color: ZincColors.text(context),
+              ),
+              onPressed: () {
+                themeNotifier.value = themeNotifier.value == ThemeMode.light
+                    ? ThemeMode.dark
+                    : ThemeMode.light;
+              },
+            ),
+            middle: Text(
+              ["Attendance Board", "Student List", "History Archive"][i],
+              style: TextStyle(
+                color: ZincColors.text(context),
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            trailing: dev != null
+                ? CupertinoButton(
+                    padding: EdgeInsets.zero,
+                    child: Icon(
+                      CupertinoIcons.refresh,
+                      size: 20,
+                      color: ZincColors.text(context),
+                    ),
+                    onPressed: syncEverything,
+                  )
+                : null,
+          ),
+          child: SafeArea(
+            child: dev == null
+                ? _buildConnect()
+                : [_todayTab(), _manageTab(), _historyTab()][i],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildConnect() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            CupertinoIcons.antenna_radiowaves_left_right,
+            size: 50,
+            color: ZincColors.mutedText(context),
+          ),
+          const SizedBox(height: 20),
+          CupertinoButton(
+            color: ZincColors.text(context),
+            onPressed: isConnecting ? null : connect,
+            child: isConnecting
+                ? const CupertinoActivityIndicator(color: CupertinoColors.white)
+                : Text(
+                    "Connect Scanner",
+                    style: TextStyle(
+                      color: ZincColors.background(context),
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+          ),
+        ],
       ),
     );
   }
 
+  // --- TAB 1: BOARD (RESTORED START FRESH) ---
   Widget _todayTab() {
-    List<Student> pList = [];
-    List<Student> aList = [];
-    allStudents.forEach(
-      (u, s) => presentToday.contains(u) ? pList.add(s) : aList.add(s),
-    );
-    return Column(
+    List<Student> students = allStudents.values.toList()
+      ..sort((a, b) => a.roll.compareTo(b.roll));
+    return ListView(
+      padding: const EdgeInsets.all(16),
       children: [
-        Container(
-          padding: const EdgeInsets.all(16),
-          color: isAttOpen ? Colors.green[50] : Colors.blueGrey[50],
+        _buildZincCard(
           child: Column(
             children: [
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text(
-                    isAttOpen ? "SESSION: ACTIVE" : "SESSION: STOPPED",
-                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        "Current State",
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                          color: ZincColors.mutedText(context),
+                        ),
+                      ),
+                      Text(
+                        isAttOpen ? "RECORDING" : "STOPPED",
+                        style: TextStyle(
+                          fontWeight: FontWeight.w900,
+                          fontSize: 18,
+                          color: ZincColors.text(context),
+                        ),
+                      ),
+                    ],
                   ),
                   if (isAttOpen)
-                    ElevatedButton(
+                    CupertinoButton(
+                      color: CupertinoColors.destructiveRed,
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
                       onPressed: () {
                         writeChar?.write(utf8.encode("STOP_ATT"));
                         setState(() => isAttOpen = false);
                       },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.red,
-                      ),
                       child: const Text(
                         "Stop",
-                        style: TextStyle(color: Colors.white),
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                          color: CupertinoColors.white,
+                        ),
                       ),
                     ),
                 ],
               ),
-              if (!isAttOpen) const SizedBox(height: 10),
-              if (!isAttOpen)
+              if (!isAttOpen) ...[
+                const SizedBox(height: 16),
                 Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
-                    ElevatedButton.icon(
-                      icon: const Icon(Icons.refresh),
-                      label: const Text("Start Fresh"),
-                      onPressed: () {
-                        setState(() {
-                          presentToday.clear();
-                          isAttOpen = true;
-                        });
-                        writeChar?.write(utf8.encode("START_ATT"));
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.green,
-                        foregroundColor: Colors.white,
+                    Expanded(
+                      child: CupertinoButton(
+                        color: CupertinoColors.activeGreen,
+                        padding: EdgeInsets.zero,
+                        onPressed: () {
+                          setState(() => isAttOpen = true);
+                          writeChar?.write(utf8.encode("RESUME_ATT"));
+                        },
+                        child: const Text(
+                          "Continue",
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 13,
+                            color: CupertinoColors.white,
+                          ),
+                        ),
                       ),
                     ),
-                    ElevatedButton.icon(
-                      icon: const Icon(Icons.play_arrow),
-                      label: const Text("Continue"),
-                      onPressed: () {
-                        setState(() => isAttOpen = true);
-                        writeChar?.write(utf8.encode("RESUME_ATT"));
-                        writeChar?.write(utf8.encode("GET_TODAY"));
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.blue,
-                        foregroundColor: Colors.white,
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: CupertinoButton(
+                        color: ZincColors.text(context),
+                        padding: EdgeInsets.zero,
+                        onPressed: () {
+                          setState(() {
+                            presentToday.clear();
+                            isAttOpen = true;
+                          });
+                          writeChar?.write(utf8.encode("START_ATT"));
+                        },
+                        child: Text(
+                          "Fresh Start",
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 13,
+                            color: ZincColors.background(context),
+                          ),
+                        ),
                       ),
                     ),
                   ],
                 ),
+              ],
             ],
           ),
         ),
-        Expanded(
-          child: ListView(
-            children: [
-              _header("ABSENT (${aList.length})", Colors.red),
-              ...aList.map(
-                (s) => ListTile(
-                  title: Text(s.name),
-                  subtitle: Text(s.roll),
-                  leading: const Icon(Icons.close, color: Colors.red),
+        const SizedBox(height: 24),
+        _buildTable(
+          headers: ["Roll", "Name", "Status"],
+          rows: students.map((s) {
+            bool present = presentToday.contains(s.uid);
+            return [
+              Text(
+                s.roll,
+                style: TextStyle(color: ZincColors.text(context), fontSize: 13),
+              ),
+              Text(
+                s.name,
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: ZincColors.text(context),
+                  fontSize: 13,
                 ),
               ),
-              _header("PRESENT (${pList.length})", Colors.green),
-              ...pList.map(
-                (s) => ListTile(
-                  title: Text(s.name),
-                  subtitle: Text(s.roll),
-                  leading: const Icon(Icons.check, color: Colors.green),
+              _buildStatusBadge(present ? "PRESENT" : "ABSENT", present),
+            ];
+          }).toList(),
+        ),
+      ],
+    );
+  }
+
+  Widget _manageTab() {
+    return Stack(
+      children: [
+        ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            _buildTable(
+              headers: ["Name", "Roll", ""],
+              rows: allStudents.values
+                  .map(
+                    (s) => [
+                      Text(
+                        s.name,
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: ZincColors.text(context),
+                          fontSize: 13,
+                        ),
+                      ),
+                      Text(
+                        s.roll,
+                        style: TextStyle(
+                          color: ZincColors.text(context),
+                          fontSize: 13,
+                        ),
+                      ),
+                      CupertinoButton(
+                        padding: EdgeInsets.zero,
+                        child: const Icon(
+                          CupertinoIcons.trash,
+                          size: 16,
+                          color: CupertinoColors.destructiveRed,
+                        ),
+                        onPressed: () {
+                          writeChar?.write(utf8.encode("DEL:${s.uid}"));
+                          setState(() => allStudents.remove(s.uid));
+                        },
+                      ),
+                    ],
+                  )
+                  .toList(),
+              compact: true,
+            ),
+            const SizedBox(height: 80),
+          ],
+        ),
+        Positioned(
+          bottom: 20,
+          right: 20,
+          child: CupertinoButton(
+            padding: EdgeInsets.zero,
+            onPressed: _openAddStudentModal,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+              decoration: BoxDecoration(
+                color: ZincColors.text(context),
+                borderRadius: BorderRadius.circular(30),
+                boxShadow: [
+                  BoxShadow(
+                    color: CupertinoColors.black.withOpacity(0.2),
+                    blurRadius: 10,
+                  ),
+                ],
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    CupertinoIcons.add,
+                    color: ZincColors.background(context),
+                    size: 18,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    "Add Student",
+                    style: TextStyle(
+                      color: ZincColors.background(context),
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _historyTab() {
+    DateTime selected = DateTime.now();
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(16),
+          child: CupertinoButton(
+            color: ZincColors.surface(context),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  CupertinoIcons.calendar,
+                  color: ZincColors.text(context),
+                  size: 18,
                 ),
+                const SizedBox(width: 8),
+                Text(
+                  "Query Date Archive",
+                  style: TextStyle(
+                    color: ZincColors.text(context),
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+            onPressed: () {
+              showCupertinoModalPopup(
+                context: context,
+                builder: (context) => Container(
+                  height: 320,
+                  color: ZincColors.background(context),
+                  child: Column(
+                    children: [
+                      Container(
+                        color: ZincColors.surface(context),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 12,
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              "Select Date",
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16,
+                                color: ZincColors.text(context),
+                              ),
+                            ),
+                            CupertinoButton(
+                              padding: EdgeInsets.zero,
+                              child: Text(
+                                "Done",
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: ZincColors.text(context),
+                                ),
+                              ),
+                              onPressed: () {
+                                setState(() {
+                                  historyResults.clear();
+                                  isHistorySyncing = true;
+                                });
+                                writeChar?.write(
+                                  utf8.encode(
+                                    "GET_HIST:${DateFormat('dd-MM-yyyy').format(selected)}",
+                                  ),
+                                );
+                                Navigator.pop(context);
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+                      Expanded(
+                        child: CupertinoDatePicker(
+                          mode: CupertinoDatePickerMode.date,
+                          initialDateTime: selected,
+                          onDateTimeChanged: (d) => selected = d,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        SizedBox(
+          height: 30,
+          child: isHistorySyncing ? const CupertinoActivityIndicator() : null,
+        ),
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            children: [
+              _buildTable(
+                headers: ["Roll", "Name", "UID"],
+                rows: historyResults
+                    .map(
+                      (s) => [
+                        Text(
+                          s.roll,
+                          style: TextStyle(
+                            color: ZincColors.text(context),
+                            fontSize: 12,
+                          ),
+                        ),
+                        Text(
+                          s.name,
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: ZincColors.text(context),
+                            fontSize: 12,
+                          ),
+                        ),
+                        Text(
+                          s.uid,
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: ZincColors.mutedText(context),
+                          ),
+                        ),
+                      ],
+                    )
+                    .toList(),
               ),
             ],
           ),
@@ -255,81 +611,205 @@ class _AttendanceAppState extends State<AttendanceApp> {
     );
   }
 
-  Widget _manageTab() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        children: [
-          TextField(
-            controller: nameC,
-            decoration: const InputDecoration(
-              labelText: "Student Name",
-              border: OutlineInputBorder(),
+  void _openAddStudentModal() {
+    detectedUID = "---";
+    scanSignal.value = null;
+    nameC.clear();
+    rollC.clear();
+    showCupertinoModalPopup(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setModalState) {
+          return Container(
+            height: MediaQuery.of(context).size.height * 0.6,
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              color: ZincColors.surface(context),
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(20),
+              ),
             ),
-          ),
-          const SizedBox(height: 10),
-          TextField(
-            controller: rollC,
-            decoration: const InputDecoration(
-              labelText: "Roll Number",
-              border: OutlineInputBorder(),
-            ),
-          ),
-          const SizedBox(height: 15),
-          Row(
-            children: [
-              Expanded(
-                child: Container(
-                  padding: const EdgeInsets.all(15),
-                  decoration: BoxDecoration(
-                    border: Border.all(color: Colors.grey),
-                    borderRadius: BorderRadius.circular(5),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      "New Registration",
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    CupertinoButton(
+                      padding: EdgeInsets.zero,
+                      child: Icon(
+                        CupertinoIcons.xmark_circle_fill,
+                        color: ZincColors.mutedText(context),
+                      ),
+                      onPressed: () => Navigator.pop(context),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 24),
+                CupertinoTextField(
+                  controller: nameC,
+                  placeholder: "Student Name",
+                  style: TextStyle(color: ZincColors.text(context)),
+                  decoration: _fieldBox(context),
+                  padding: const EdgeInsets.all(14),
+                ),
+                const SizedBox(height: 12),
+                CupertinoTextField(
+                  controller: rollC,
+                  placeholder: "Roll Number",
+                  style: TextStyle(color: ZincColors.text(context)),
+                  decoration: _fieldBox(context),
+                  padding: const EdgeInsets.all(14),
+                ),
+                const SizedBox(height: 24),
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: _fieldBox(context),
+                  child: Row(
+                    children: [
+                      Icon(
+                        detectedUID == "---"
+                            ? CupertinoIcons.creditcard
+                            : CupertinoIcons.check_mark_circled_solid,
+                        color: detectedUID == "---"
+                            ? ZincColors.mutedText(context)
+                            : CupertinoColors.activeGreen,
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          detectedUID == "---"
+                              ? "No card detected"
+                              : "UID: $detectedUID",
+                          style: TextStyle(
+                            fontFamily: 'Courier',
+                            fontSize: 14,
+                            color: detectedUID == "---"
+                                ? ZincColors.mutedText(context)
+                                : ZincColors.text(context),
+                          ),
+                        ),
+                      ),
+                      CupertinoButton(
+                        padding: EdgeInsets.zero,
+                        child: Text(
+                          detectedUID == "---" ? "Scan Card" : "Rescan",
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        onPressed: () async {
+                          writeChar?.write(utf8.encode("PREP_REG"));
+                          await showCupertinoModalPopup(
+                            context: context,
+                            builder: (c) => const _PulseDialog(),
+                          );
+                          setModalState(
+                            () => detectedUID = scanSignal.value ?? "---",
+                          );
+                        },
+                      ),
+                    ],
                   ),
-                  child: Text(
-                    "UID: $detectedUID",
-                    style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                const Spacer(),
+                CupertinoButton(
+                  color: ZincColors.text(context),
+                  minSize: 50,
+                  onPressed: (detectedUID == "---")
+                      ? null
+                      : () {
+                          writeChar?.write(
+                            utf8.encode(
+                              "ADD:$detectedUID,${nameC.text},${rollC.text}",
+                            ),
+                          );
+                          syncEverything();
+                          Navigator.pop(context);
+                        },
+                  child: Center(
+                    child: Text(
+                      "Finalize Registration",
+                      style: TextStyle(
+                        color: ZincColors.background(context),
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  // Helper UI methods
+  Widget _buildTable({
+    required List<String> headers,
+    required List<List<Widget>> rows,
+    bool compact = false,
+  }) {
+    return Container(
+      decoration: BoxDecoration(
+        border: Border.all(color: ZincColors.border(context)),
+        borderRadius: BorderRadius.circular(8),
+        color: ZincColors.surface(context),
+      ),
+      child: Table(
+        defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+        columnWidths: const {
+          0: IntrinsicColumnWidth(),
+          2: IntrinsicColumnWidth(),
+        },
+        children: [
+          TableRow(
+            decoration: BoxDecoration(
+              color: ZincColors.text(context).withOpacity(0.04),
+            ),
+            children: headers
+                .map(
+                  (h) => Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Text(
+                      h,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w900,
+                        color: ZincColors.text(context),
+                      ),
+                    ),
+                  ),
+                )
+                .toList(),
+          ),
+          ...rows.map(
+            (row) => TableRow(
+              decoration: BoxDecoration(
+                border: Border(
+                  bottom: BorderSide(
+                    color: ZincColors.border(context),
+                    width: 0.5,
                   ),
                 ),
               ),
-              const SizedBox(width: 10),
-              ElevatedButton(
-                onPressed: _showScanDialog,
-                child: const Text("Scan"),
-              ),
-            ],
-          ),
-          const SizedBox(height: 15),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              minimumSize: const Size.fromHeight(50),
-              backgroundColor: Colors.indigo,
-              foregroundColor: Colors.white,
-            ),
-            onPressed: () {
-              if (detectedUID.contains("Scan") || detectedUID.contains("Wait"))
-                return;
-              writeChar?.write(
-                utf8.encode("ADD:$detectedUID,${nameC.text},${rollC.text}"),
-              );
-              nameC.clear();
-              rollC.clear();
-              detectedUID = "Scan a card...";
-              syncEverything();
-            },
-            child: const Text("Register Student"),
-          ),
-          const Divider(height: 40),
-          ...allStudents.values.map(
-            (s) => ListTile(
-              title: Text(s.name),
-              subtitle: Text(s.uid),
-              trailing: IconButton(
-                icon: const Icon(Icons.delete, color: Colors.red),
-                onPressed: () {
-                  writeChar?.write(utf8.encode("DEL:${s.uid}"));
-                  setState(() => allStudents.remove(s.uid));
-                },
-              ),
+              children: row
+                  .map(
+                    (cell) => Padding(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: compact ? 8 : 14,
+                      ),
+                      child: cell,
+                    ),
+                  )
+                  .toList(),
             ),
           ),
         ],
@@ -337,58 +817,45 @@ class _AttendanceAppState extends State<AttendanceApp> {
     );
   }
 
-  Widget _historyTab() {
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.all(10),
-          child: ElevatedButton.icon(
-            icon: const Icon(Icons.calendar_today),
-            label: const Text("Select Date"),
-            onPressed: () async {
-              DateTime? d = await showDatePicker(
-                context: context,
-                initialDate: DateTime.now(),
-                firstDate: DateTime(2023),
-                lastDate: DateTime.now(),
-              );
-              if (d != null) {
-                setState(() => historyLogs.clear());
-                writeChar?.write(
-                  utf8.encode("GET_HIST:${DateFormat('dd-MM-yyyy').format(d)}"),
-                );
-              }
-            },
-          ),
+  Widget _buildStatusBadge(String text, bool success) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: success ? const Color(0xFFDCFCE7) : const Color(0xFFFEE2E2),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontSize: 9,
+          fontWeight: FontWeight.w900,
+          color: success ? const Color(0xFF166534) : const Color(0xFF991B1B),
         ),
-        Expanded(
-          child: ListView.builder(
-            itemCount: historyLogs.length,
-            itemBuilder: (c, i) => ListTile(
-              title: Text(allStudents[historyLogs[i]]?.name ?? "Unknown"),
-              subtitle: Text(historyLogs[i]),
-              leading: const Icon(Icons.history),
-            ),
-          ),
-        ),
-      ],
+      ),
     );
   }
 
-  Widget _header(String t, Color c) => Container(
-    padding: const EdgeInsets.all(8),
-    width: double.infinity,
-    color: c.withOpacity(0.1),
-    child: Text(
-      t,
-      style: TextStyle(color: c, fontWeight: FontWeight.bold),
-    ),
+  Widget _buildZincCard({required Widget child}) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: ZincColors.surface(context),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: ZincColors.border(context)),
+      ),
+      child: child,
+    );
+  }
+
+  BoxDecoration _fieldBox(BuildContext context) => BoxDecoration(
+    color: ZincColors.background(context).withOpacity(0.5),
+    border: Border.all(color: ZincColors.border(context)),
+    borderRadius: BorderRadius.circular(8),
   );
 }
 
 class _PulseDialog extends StatefulWidget {
-  final VoidCallback onCancel;
-  const _PulseDialog({required this.onCancel});
+  const _PulseDialog();
   @override
   State<_PulseDialog> createState() => _PulseDialogState();
 }
@@ -396,6 +863,8 @@ class _PulseDialog extends StatefulWidget {
 class _PulseDialogState extends State<_PulseDialog>
     with SingleTickerProviderStateMixin {
   late AnimationController _c;
+  bool isFinished = false;
+
   @override
   void initState() {
     super.initState();
@@ -403,38 +872,73 @@ class _PulseDialogState extends State<_PulseDialog>
       vsync: this,
       duration: const Duration(milliseconds: 1000),
     )..repeat(reverse: true);
+    scanSignal.addListener(_onScanReceived);
+  }
+
+  void _onScanReceived() async {
+    if (scanSignal.value != null && mounted) {
+      setState(() => isFinished = true);
+      _c.stop();
+      _c.duration = const Duration(milliseconds: 300);
+      _c.forward(from: 0.5);
+      await Future.delayed(const Duration(milliseconds: 1200));
+      if (mounted) Navigator.pop(context);
+    }
   }
 
   @override
   void dispose() {
+    scanSignal.removeListener(_onScanReceived);
     _c.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text("Registration Mode"),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
+    Color activeColor = isFinished
+        ? CupertinoColors.activeGreen
+        : ZincColors.text(context);
+    IconData activeIcon = isFinished
+        ? CupertinoIcons.check_mark_circled_solid
+        : CupertinoIcons.radiowaves_left;
+
+    return CupertinoActionSheet(
+      title: Text(
+        isFinished ? "Success!" : "Ready to Sync",
+        style: TextStyle(color: ZincColors.text(context)),
+      ),
+      message: Column(
         children: [
-          ScaleTransition(
-            scale: Tween(begin: 1.0, end: 1.2).animate(_c),
-            child: const Icon(Icons.nfc, size: 80, color: Colors.indigo),
+          const SizedBox(height: 24),
+          AnimatedBuilder(
+            animation: _c,
+            builder: (context, child) {
+              double scale = isFinished
+                  ? (1.0 + (_c.value * 0.4))
+                  : (1.0 + (_c.value * 0.25));
+              return Transform.scale(
+                scale: scale,
+                child: Icon(activeIcon, size: 50, color: activeColor),
+              );
+            },
           ),
-          const SizedBox(height: 20),
-          const Text("Scan NEW card now"),
+          const SizedBox(height: 24),
+          Text(
+            isFinished
+                ? "UID Captured: ${scanSignal.value}"
+                : "Tap the student card on the RFID reader.",
+            style: TextStyle(color: ZincColors.mutedText(context)),
+          ),
         ],
       ),
-      actions: [
-        TextButton(
-          onPressed: () {
-            widget.onCancel();
-            Navigator.pop(context);
-          },
-          child: const Text("Cancel"),
+      cancelButton: CupertinoActionSheetAction(
+        child: Text(
+          "Cancel",
+          style: TextStyle(color: ZincColors.text(context)),
         ),
-      ],
+        isDestructiveAction: true,
+        onPressed: () => Navigator.pop(context),
+      ),
     );
   }
 }
