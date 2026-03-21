@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:intl/intl.dart';
 
@@ -70,6 +71,184 @@ class Student {
   Student(this.uid, this.name, this.roll);
 }
 
+// ─── Animated List Item wrapper ───────────────────────────────────────────────
+class _FadeSlideIn extends StatefulWidget {
+  final Widget child;
+  final int index;
+  final Duration baseDuration;
+
+  const _FadeSlideIn({
+    required this.child,
+    this.index = 0,
+    this.baseDuration = const Duration(milliseconds: 320),
+  });
+
+  @override
+  State<_FadeSlideIn> createState() => _FadeSlideInState();
+}
+
+class _FadeSlideInState extends State<_FadeSlideIn>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _opacity;
+  late Animation<Offset> _slide;
+
+  @override
+  void initState() {
+    super.initState();
+    final delay = Duration(milliseconds: widget.index * 40);
+    _controller = AnimationController(
+      vsync: this,
+      duration: widget.baseDuration,
+    );
+    _opacity = CurvedAnimation(parent: _controller, curve: Curves.easeOut);
+    _slide = Tween<Offset>(
+      begin: const Offset(0, 0.06),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic));
+    Future.delayed(delay, () {
+      if (mounted) _controller.forward();
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => FadeTransition(
+    opacity: _opacity,
+    child: SlideTransition(position: _slide, child: widget.child),
+  );
+}
+
+// ─── Animated status badge (cross-fades between PRESENT / ABSENT) ─────────────
+class _AnimatedStatusBadge extends StatefulWidget {
+  final bool present;
+  const _AnimatedStatusBadge({required this.present});
+
+  @override
+  State<_AnimatedStatusBadge> createState() => _AnimatedStatusBadgeState();
+}
+
+class _AnimatedStatusBadgeState extends State<_AnimatedStatusBadge>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _scale;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 250),
+    );
+    _scale = Tween(
+      begin: 0.85,
+      end: 1.0,
+    ).animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeOutBack));
+    _ctrl.forward();
+  }
+
+  @override
+  void didUpdateWidget(_AnimatedStatusBadge old) {
+    super.didUpdateWidget(old);
+    if (old.present != widget.present) {
+      _ctrl.forward(from: 0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ScaleTransition(
+      scale: _scale,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOutCubic,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: widget.present
+              ? const Color(0xFFDCFCE7)
+              : const Color(0xFFFEE2E2),
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 200),
+          child: Text(
+            widget.present ? "PRESENT" : "ABSENT",
+            key: ValueKey(widget.present),
+            style: TextStyle(
+              fontSize: 9,
+              fontWeight: FontWeight.w900,
+              color: widget.present
+                  ? const Color(0xFF166534)
+                  : const Color(0xFF991B1B),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Spring-pressed button wrapper ────────────────────────────────────────────
+class _SpringButton extends StatefulWidget {
+  final Widget child;
+  final VoidCallback? onPressed;
+
+  const _SpringButton({super.key, required this.child, this.onPressed});
+
+  @override
+  State<_SpringButton> createState() => _SpringButtonState();
+}
+
+class _SpringButtonState extends State<_SpringButton>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _scale;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 120),
+    );
+    _scale = Tween(
+      begin: 1.0,
+      end: 0.94,
+    ).animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut));
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: (_) => _ctrl.forward(),
+      onTapUp: (_) {
+        _ctrl.reverse();
+        widget.onPressed?.call();
+      },
+      onTapCancel: () => _ctrl.reverse(),
+      child: ScaleTransition(scale: _scale, child: widget.child),
+    );
+  }
+}
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
 class AttendanceApp extends StatefulWidget {
   const AttendanceApp({super.key});
   @override
@@ -85,10 +264,14 @@ class _AttendanceAppState extends State<AttendanceApp> {
   bool isAttOpen = true, isConnecting = false, isHistorySyncing = false;
   String detectedUID = "---";
 
+  // Track removals for exit animation
+  final Set<String> _removingStudents = {};
+
   final TextEditingController nameC = TextEditingController();
   final TextEditingController rollC = TextEditingController();
 
   void connect() async {
+    HapticFeedback.mediumImpact();
     setState(() => isConnecting = true);
     FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
     FlutterBluePlus.scanResults.listen((results) async {
@@ -118,6 +301,7 @@ class _AttendanceAppState extends State<AttendanceApp> {
   }
 
   void syncEverything() {
+    HapticFeedback.lightImpact();
     writeChar?.write(
       utf8.encode("TIME:${DateTime.now().millisecondsSinceEpoch ~/ 1000}"),
     );
@@ -133,8 +317,10 @@ class _AttendanceAppState extends State<AttendanceApp> {
       detectedUID = uid;
       scanSignal.value = uid;
     } else if (msg.startsWith("LIVE:") || msg.startsWith("TOD:")) {
-      if (!msg.contains("END"))
+      if (!msg.contains("END")) {
+        HapticFeedback.selectionClick();
         setState(() => presentToday.add(msg.substring(msg.indexOf(':') + 1)));
+      }
     } else if (msg.startsWith("STU:")) {
       if (msg == "STU:END") return;
       var p = msg.substring(4).split(',');
@@ -181,20 +367,29 @@ class _AttendanceAppState extends State<AttendanceApp> {
         return CupertinoPageScaffold(
           backgroundColor: ZincColors.background(context),
           navigationBar: CupertinoNavigationBar(
-            backgroundColor: ZincColors.surface(context).withOpacity(0.9),
+            backgroundColor: ZincColors.surface(context).withOpacity(0.92),
             border: Border(
-              bottom: BorderSide(color: ZincColors.border(context)),
+              bottom: BorderSide(color: ZincColors.border(context), width: 0.5),
             ),
             leading: CupertinoButton(
               padding: EdgeInsets.zero,
-              child: Icon(
-                ZincColors.getBrightness(context) == Brightness.dark
-                    ? CupertinoIcons.moon_fill
-                    : CupertinoIcons.sun_max_fill,
-                size: 20,
-                color: ZincColors.text(context),
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 300),
+                transitionBuilder: (child, anim) => ScaleTransition(
+                  scale: anim,
+                  child: FadeTransition(opacity: anim, child: child),
+                ),
+                child: Icon(
+                  ZincColors.getBrightness(context) == Brightness.dark
+                      ? CupertinoIcons.moon_fill
+                      : CupertinoIcons.sun_max_fill,
+                  key: ValueKey(ZincColors.getBrightness(context)),
+                  size: 20,
+                  color: ZincColors.text(context),
+                ),
               ),
               onPressed: () {
+                HapticFeedback.lightImpact();
                 themeNotifier.value = themeNotifier.value == ThemeMode.light
                     ? ThemeMode.dark
                     : ThemeMode.light;
@@ -220,184 +415,174 @@ class _AttendanceAppState extends State<AttendanceApp> {
                 : null,
           ),
           child: SafeArea(
-            child: dev == null
-                ? _buildConnect()
-                : [_todayTab(), _manageTab(), _historyTab()][i],
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 350),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeInCubic,
+              transitionBuilder: (child, animation) => FadeTransition(
+                opacity: animation,
+                child: SlideTransition(
+                  position: Tween<Offset>(
+                    begin: const Offset(0, 0.03),
+                    end: Offset.zero,
+                  ).animate(animation),
+                  child: child,
+                ),
+              ),
+              child: dev == null
+                  ? _buildConnect()
+                  : [_todayTab(), _manageTab(), _historyTab()][i],
+            ),
           ),
         );
       },
     );
   }
 
+  // ─── Connect screen ──────────────────────────────────────────────────────────
   Widget _buildConnect() {
     return Center(
+      key: const ValueKey('connect'),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(
-            CupertinoIcons.antenna_radiowaves_left_right,
-            size: 50,
+          _PulsingIcon(
+            icon: CupertinoIcons.antenna_radiowaves_left_right,
             color: ZincColors.mutedText(context),
+            size: 54,
           ),
-          const SizedBox(height: 20),
-          CupertinoButton(
-            color: ZincColors.text(context),
+          const SizedBox(height: 28),
+          _SpringButton(
             onPressed: isConnecting ? null : connect,
-            child: isConnecting
-                ? const CupertinoActivityIndicator(color: CupertinoColors.white)
-                : Text(
-                    "Connect Scanner",
-                    style: TextStyle(
-                      color: ZincColors.background(context),
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 250),
+              curve: Curves.easeOutCubic,
+              decoration: BoxDecoration(
+                color: ZincColors.text(context),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 14),
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 200),
+                child: isConnecting
+                    ? const SizedBox(
+                        width: 120,
+                        child: Center(
+                          child: CupertinoActivityIndicator(
+                            color: CupertinoColors.white,
+                          ),
+                        ),
+                      )
+                    : Text(
+                        "Connect Scanner",
+                        key: const ValueKey('label'),
+                        style: TextStyle(
+                          color: ZincColors.background(context),
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+              ),
+            ),
           ),
         ],
       ),
     );
   }
 
-  // --- TAB 1: BOARD (RESTORED START FRESH) ---
+  // ─── TAB 1: Live Board ───────────────────────────────────────────────────────
   Widget _todayTab() {
     List<Student> students = allStudents.values.toList()
       ..sort((a, b) => a.roll.compareTo(b.roll));
+
     return ListView(
-      padding: const EdgeInsets.all(16),
+      key: const ValueKey('today'),
+      padding: const EdgeInsets.fromLTRB(16, 20, 16, 24),
       children: [
-        _buildZincCard(
-          child: Column(
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        "Current State",
-                        style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.bold,
-                          color: ZincColors.mutedText(context),
-                        ),
-                      ),
-                      Text(
-                        isAttOpen ? "RECORDING" : "STOPPED",
-                        style: TextStyle(
-                          fontWeight: FontWeight.w900,
-                          fontSize: 18,
-                          color: ZincColors.text(context),
-                        ),
-                      ),
-                    ],
-                  ),
-                  if (isAttOpen)
-                    CupertinoButton(
-                      color: CupertinoColors.destructiveRed,
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      onPressed: () {
-                        writeChar?.write(utf8.encode("STOP_ATT"));
-                        setState(() => isAttOpen = false);
-                      },
-                      child: const Text(
-                        "Stop",
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 13,
-                          color: CupertinoColors.white,
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-              if (!isAttOpen) ...[
-                const SizedBox(height: 16),
-                Row(
-                  children: [
-                    Expanded(
-                      child: CupertinoButton(
-                        color: CupertinoColors.activeGreen,
-                        padding: EdgeInsets.zero,
-                        onPressed: () {
-                          setState(() => isAttOpen = true);
-                          writeChar?.write(utf8.encode("RESUME_ATT"));
-                        },
-                        child: const Text(
-                          "Continue",
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 13,
-                            color: CupertinoColors.white,
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: CupertinoButton(
-                        color: ZincColors.text(context),
-                        padding: EdgeInsets.zero,
-                        onPressed: () {
-                          setState(() {
-                            presentToday.clear();
-                            isAttOpen = true;
-                          });
-                          writeChar?.write(utf8.encode("START_ATT"));
-                        },
-                        child: Text(
-                          "Fresh Start",
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 13,
-                            color: ZincColors.background(context),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ],
+        _FadeSlideIn(
+          index: 0,
+          child: _buildZincCard(
+            child: _AnimatedStatusCard(
+              isAttOpen: isAttOpen,
+              onStop: () {
+                HapticFeedback.mediumImpact();
+                writeChar?.write(utf8.encode("STOP_ATT"));
+                setState(() => isAttOpen = false);
+              },
+              onContinue: () {
+                HapticFeedback.mediumImpact();
+                setState(() => isAttOpen = true);
+                writeChar?.write(utf8.encode("RESUME_ATT"));
+              },
+              onFreshStart: () {
+                HapticFeedback.heavyImpact();
+                setState(() {
+                  presentToday.clear();
+                  isAttOpen = true;
+                });
+                writeChar?.write(utf8.encode("START_ATT"));
+              },
+              context: context,
+            ),
           ),
         ),
-        const SizedBox(height: 24),
-        _buildTable(
-          headers: ["Roll", "Name", "Status"],
-          rows: students.map((s) {
-            bool present = presentToday.contains(s.uid);
-            return [
-              Text(
-                s.roll,
-                style: TextStyle(color: ZincColors.text(context), fontSize: 13),
-              ),
-              Text(
-                s.name,
-                style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  color: ZincColors.text(context),
-                  fontSize: 13,
-                ),
-              ),
-              _buildStatusBadge(present ? "PRESENT" : "ABSENT", present),
-            ];
-          }).toList(),
+        const SizedBox(height: 20),
+        _FadeSlideIn(
+          index: 1,
+          child: _buildAnimatedTable(
+            headers: const ["Roll", "Name", "Status"],
+            rows: students.asMap().entries.map((entry) {
+              int idx = entry.key;
+              Student s = entry.value;
+              bool present = presentToday.contains(s.uid);
+              return _AnimatedTableRow(
+                index: idx,
+                cells: [
+                  Text(
+                    s.roll,
+                    style: TextStyle(
+                      color: ZincColors.text(context),
+                      fontSize: 13,
+                    ),
+                  ),
+                  Text(
+                    s.name,
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: ZincColors.text(context),
+                      fontSize: 13,
+                    ),
+                  ),
+                  _AnimatedStatusBadge(present: present),
+                ],
+              );
+            }).toList(),
+          ),
         ),
       ],
     );
   }
 
+  // ─── TAB 2: Directory ────────────────────────────────────────────────────────
   Widget _manageTab() {
+    final students = allStudents.values.toList();
     return Stack(
+      key: const ValueKey('manage'),
       children: [
         ListView(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.fromLTRB(16, 20, 16, 100),
           children: [
-            _buildTable(
-              headers: ["Name", "Roll", ""],
-              rows: allStudents.values
-                  .map(
-                    (s) => [
+            _FadeSlideIn(
+              index: 0,
+              child: _buildAnimatedTable(
+                headers: const ["Name", "Roll", ""],
+                rows: students.asMap().entries.map((entry) {
+                  int idx = entry.key;
+                  Student s = entry.value;
+                  return _AnimatedTableRow(
+                    index: idx,
+                    compact: true,
+                    cells: [
                       Text(
                         s.name,
                         style: TextStyle(
@@ -415,58 +600,68 @@ class _AttendanceAppState extends State<AttendanceApp> {
                       ),
                       CupertinoButton(
                         padding: EdgeInsets.zero,
+                        minSize: 28,
                         child: const Icon(
                           CupertinoIcons.trash,
                           size: 16,
                           color: CupertinoColors.destructiveRed,
                         ),
-                        onPressed: () {
+                        onPressed: () async {
+                          HapticFeedback.mediumImpact();
                           writeChar?.write(utf8.encode("DEL:${s.uid}"));
                           setState(() => allStudents.remove(s.uid));
                         },
                       ),
                     ],
-                  )
-                  .toList(),
-              compact: true,
+                  );
+                }).toList(),
+              ),
             ),
-            const SizedBox(height: 80),
           ],
         ),
         Positioned(
-          bottom: 20,
+          bottom: 24,
           right: 20,
-          child: CupertinoButton(
-            padding: EdgeInsets.zero,
-            onPressed: _openAddStudentModal,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-              decoration: BoxDecoration(
-                color: ZincColors.text(context),
-                borderRadius: BorderRadius.circular(30),
-                boxShadow: [
-                  BoxShadow(
-                    color: CupertinoColors.black.withOpacity(0.2),
-                    blurRadius: 10,
-                  ),
-                ],
-              ),
-              child: Row(
-                children: [
-                  Icon(
-                    CupertinoIcons.add,
-                    color: ZincColors.background(context),
-                    size: 18,
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    "Add Student",
-                    style: TextStyle(
-                      color: ZincColors.background(context),
-                      fontWeight: FontWeight.bold,
+          child: _FadeSlideIn(
+            index: 2,
+            baseDuration: const Duration(milliseconds: 450),
+            child: _SpringButton(
+              onPressed: _openAddStudentModal,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 14,
+                ),
+                decoration: BoxDecoration(
+                  color: ZincColors.text(context),
+                  borderRadius: BorderRadius.circular(32),
+                  boxShadow: [
+                    BoxShadow(
+                      color: ZincColors.text(context).withOpacity(0.25),
+                      blurRadius: 16,
+                      offset: const Offset(0, 4),
                     ),
-                  ),
-                ],
+                  ],
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      CupertinoIcons.add,
+                      color: ZincColors.background(context),
+                      size: 18,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      "Add Student",
+                      style: TextStyle(
+                        color: ZincColors.background(context),
+                        fontWeight: FontWeight.bold,
+                        fontSize: 15,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -475,142 +670,188 @@ class _AttendanceAppState extends State<AttendanceApp> {
     );
   }
 
+  // ─── TAB 3: History ──────────────────────────────────────────────────────────
   Widget _historyTab() {
     DateTime selected = DateTime.now();
     return Column(
+      key: const ValueKey('history'),
       children: [
-        Padding(
-          padding: const EdgeInsets.all(16),
-          child: CupertinoButton(
-            color: ZincColors.surface(context),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  CupertinoIcons.calendar,
-                  color: ZincColors.text(context),
-                  size: 18,
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  "Query Date Archive",
-                  style: TextStyle(
-                    color: ZincColors.text(context),
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ],
-            ),
-            onPressed: () {
-              showCupertinoModalPopup(
-                context: context,
-                builder: (context) => Container(
-                  height: 320,
-                  color: ZincColors.background(context),
-                  child: Column(
-                    children: [
-                      Container(
-                        color: ZincColors.surface(context),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 12,
-                        ),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              "Select Date",
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 16,
-                                color: ZincColors.text(context),
-                              ),
-                            ),
-                            CupertinoButton(
-                              padding: EdgeInsets.zero,
-                              child: Text(
-                                "Done",
+        const SizedBox(height: 16),
+        _FadeSlideIn(
+          index: 0,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: _SpringButton(
+              onPressed: () {
+                showCupertinoModalPopup(
+                  context: context,
+                  builder: (context) => Container(
+                    height: 320,
+                    color: ZincColors.background(context),
+                    child: Column(
+                      children: [
+                        Container(
+                          color: ZincColors.surface(context),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 12,
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                "Select Date",
                                 style: TextStyle(
                                   fontWeight: FontWeight.bold,
+                                  fontSize: 16,
                                   color: ZincColors.text(context),
                                 ),
                               ),
-                              onPressed: () {
-                                setState(() {
-                                  historyResults.clear();
-                                  isHistorySyncing = true;
-                                });
-                                writeChar?.write(
-                                  utf8.encode(
-                                    "GET_HIST:${DateFormat('dd-MM-yyyy').format(selected)}",
+                              CupertinoButton(
+                                padding: EdgeInsets.zero,
+                                child: Text(
+                                  "Done",
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    color: ZincColors.text(context),
                                   ),
-                                );
-                                Navigator.pop(context);
-                              },
-                            ),
-                          ],
-                        ),
-                      ),
-                      Expanded(
-                        child: CupertinoDatePicker(
-                          mode: CupertinoDatePickerMode.date,
-                          initialDateTime: selected,
-                          onDateTimeChanged: (d) => selected = d,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
-        SizedBox(
-          height: 30,
-          child: isHistorySyncing ? const CupertinoActivityIndicator() : null,
-        ),
-        Expanded(
-          child: ListView(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            children: [
-              _buildTable(
-                headers: ["Roll", "Name", "UID"],
-                rows: historyResults
-                    .map(
-                      (s) => [
-                        Text(
-                          s.roll,
-                          style: TextStyle(
-                            color: ZincColors.text(context),
-                            fontSize: 12,
+                                ),
+                                onPressed: () {
+                                  HapticFeedback.mediumImpact();
+                                  setState(() {
+                                    historyResults.clear();
+                                    isHistorySyncing = true;
+                                  });
+                                  writeChar?.write(
+                                    utf8.encode(
+                                      "GET_HIST:${DateFormat('dd-MM-yyyy').format(selected)}",
+                                    ),
+                                  );
+                                  Navigator.pop(context);
+                                },
+                              ),
+                            ],
                           ),
                         ),
-                        Text(
-                          s.name,
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: ZincColors.text(context),
-                            fontSize: 12,
-                          ),
-                        ),
-                        Text(
-                          s.uid,
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: ZincColors.mutedText(context),
+                        Expanded(
+                          child: CupertinoDatePicker(
+                            mode: CupertinoDatePickerMode.date,
+                            initialDateTime: selected,
+                            onDateTimeChanged: (d) => selected = d,
                           ),
                         ),
                       ],
-                    )
-                    .toList(),
+                    ),
+                  ),
+                );
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                decoration: BoxDecoration(
+                  color: ZincColors.surface(context),
+                  border: Border.all(color: ZincColors.border(context)),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      CupertinoIcons.calendar,
+                      color: ZincColors.text(context),
+                      size: 18,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      "Query Date Archive",
+                      style: TextStyle(
+                        color: ZincColors.text(context),
+                        fontWeight: FontWeight.w600,
+                        fontSize: 15,
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ],
+            ),
+          ),
+        ),
+        AnimatedContainer(
+          duration: const Duration(milliseconds: 300),
+          height: isHistorySyncing ? 44 : 16,
+          curve: Curves.easeOutCubic,
+          child: Center(
+            child: AnimatedOpacity(
+              duration: const Duration(milliseconds: 250),
+              opacity: isHistorySyncing ? 1.0 : 0.0,
+              child: const CupertinoActivityIndicator(),
+            ),
+          ),
+        ),
+        Expanded(
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 300),
+            switchInCurve: Curves.easeOutCubic,
+            child: historyResults.isEmpty
+                ? Center(
+                    key: const ValueKey('empty'),
+                    child: Text(
+                      isHistorySyncing
+                          ? "Loading..."
+                          : "Select a date to view records",
+                      style: TextStyle(
+                        color: ZincColors.mutedText(context),
+                        fontSize: 14,
+                      ),
+                    ),
+                  )
+                : ListView(
+                    key: const ValueKey('results'),
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                    children: [
+                      _buildAnimatedTable(
+                        headers: const ["Roll", "Name", "UID"],
+                        rows: historyResults.asMap().entries.map((entry) {
+                          int idx = entry.key;
+                          Student s = entry.value;
+                          return _AnimatedTableRow(
+                            index: idx,
+                            cells: [
+                              Text(
+                                s.roll,
+                                style: TextStyle(
+                                  color: ZincColors.text(context),
+                                  fontSize: 12,
+                                ),
+                              ),
+                              Text(
+                                s.name,
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: ZincColors.text(context),
+                                  fontSize: 12,
+                                ),
+                              ),
+                              Text(
+                                s.uid,
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: ZincColors.mutedText(context),
+                                  fontFamily: 'Courier',
+                                ),
+                              ),
+                            ],
+                          );
+                        }).toList(),
+                      ),
+                    ],
+                  ),
           ),
         ),
       ],
     );
   }
 
+  // ─── Add Student Modal ────────────────────────────────────────────────────────
   void _openAddStudentModal() {
     detectedUID = "---";
     scanSignal.value = null;
@@ -621,8 +862,8 @@ class _AttendanceAppState extends State<AttendanceApp> {
       builder: (context) => StatefulBuilder(
         builder: (context, setModalState) {
           return Container(
-            height: MediaQuery.of(context).size.height * 0.6,
-            padding: const EdgeInsets.all(24),
+            height: MediaQuery.of(context).size.height * 0.62,
+            padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
             decoration: BoxDecoration(
               color: ZincColors.surface(context),
               borderRadius: const BorderRadius.vertical(
@@ -632,6 +873,18 @@ class _AttendanceAppState extends State<AttendanceApp> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // Handle bar
+                Center(
+                  child: Container(
+                    width: 36,
+                    height: 4,
+                    margin: const EdgeInsets.only(bottom: 20),
+                    decoration: BoxDecoration(
+                      color: ZincColors.border(context),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -644,61 +897,95 @@ class _AttendanceAppState extends State<AttendanceApp> {
                     ),
                     CupertinoButton(
                       padding: EdgeInsets.zero,
+                      minSize: 30,
                       child: Icon(
                         CupertinoIcons.xmark_circle_fill,
                         color: ZincColors.mutedText(context),
+                        size: 26,
                       ),
                       onPressed: () => Navigator.pop(context),
                     ),
                   ],
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: 20),
                 CupertinoTextField(
                   controller: nameC,
                   placeholder: "Student Name",
                   style: TextStyle(color: ZincColors.text(context)),
                   decoration: _fieldBox(context),
-                  padding: const EdgeInsets.all(14),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 14,
+                  ),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 10),
                 CupertinoTextField(
                   controller: rollC,
                   placeholder: "Roll Number",
                   style: TextStyle(color: ZincColors.text(context)),
                   decoration: _fieldBox(context),
-                  padding: const EdgeInsets.all(14),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 14,
+                  ),
                 ),
-                const SizedBox(height: 24),
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: _fieldBox(context),
+                const SizedBox(height: 16),
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 300),
+                  curve: Curves.easeOutCubic,
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: detectedUID != "---"
+                        ? const Color(0xFFDCFCE7)
+                        : ZincColors.background(context).withOpacity(0.5),
+                    border: Border.all(
+                      color: detectedUID != "---"
+                          ? const Color(0xFF86EFAC)
+                          : ZincColors.border(context),
+                    ),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
                   child: Row(
                     children: [
-                      Icon(
-                        detectedUID == "---"
-                            ? CupertinoIcons.creditcard
-                            : CupertinoIcons.check_mark_circled_solid,
-                        color: detectedUID == "---"
-                            ? ZincColors.mutedText(context)
-                            : CupertinoColors.activeGreen,
+                      AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 250),
+                        transitionBuilder: (child, anim) => ScaleTransition(
+                          scale: anim,
+                          child: FadeTransition(opacity: anim, child: child),
+                        ),
+                        child: Icon(
+                          detectedUID == "---"
+                              ? CupertinoIcons.creditcard
+                              : CupertinoIcons.check_mark_circled_solid,
+                          key: ValueKey(detectedUID == "---"),
+                          color: detectedUID == "---"
+                              ? ZincColors.mutedText(context)
+                              : CupertinoColors.activeGreen,
+                          size: 22,
+                        ),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
-                        child: Text(
-                          detectedUID == "---"
-                              ? "No card detected"
-                              : "UID: $detectedUID",
-                          style: TextStyle(
-                            fontFamily: 'Courier',
-                            fontSize: 14,
-                            color: detectedUID == "---"
-                                ? ZincColors.mutedText(context)
-                                : ZincColors.text(context),
+                        child: AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 250),
+                          child: Text(
+                            detectedUID == "---"
+                                ? "No card detected"
+                                : "UID: $detectedUID",
+                            key: ValueKey(detectedUID),
+                            style: TextStyle(
+                              fontFamily: 'Courier',
+                              fontSize: 13,
+                              color: detectedUID == "---"
+                                  ? ZincColors.mutedText(context)
+                                  : const Color(0xFF166534),
+                            ),
                           ),
                         ),
                       ),
                       CupertinoButton(
                         padding: EdgeInsets.zero,
+                        minSize: 30,
                         child: Text(
                           detectedUID == "---" ? "Scan Card" : "Rescan",
                           style: const TextStyle(fontWeight: FontWeight.bold),
@@ -718,12 +1005,11 @@ class _AttendanceAppState extends State<AttendanceApp> {
                   ),
                 ),
                 const Spacer(),
-                CupertinoButton(
-                  color: ZincColors.text(context),
-                  minSize: 50,
+                _SpringButton(
                   onPressed: (detectedUID == "---")
                       ? null
                       : () {
+                          HapticFeedback.mediumImpact();
                           writeChar?.write(
                             utf8.encode(
                               "ADD:$detectedUID,${nameC.text},${rollC.text}",
@@ -732,12 +1018,25 @@ class _AttendanceAppState extends State<AttendanceApp> {
                           syncEverything();
                           Navigator.pop(context);
                         },
-                  child: Center(
-                    child: Text(
-                      "Finalize Registration",
-                      style: TextStyle(
-                        color: ZincColors.background(context),
-                        fontWeight: FontWeight.bold,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 250),
+                    curve: Curves.easeOutCubic,
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(vertical: 15),
+                    decoration: BoxDecoration(
+                      color: detectedUID == "---"
+                          ? ZincColors.mutedText(context).withOpacity(0.4)
+                          : ZincColors.text(context),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Center(
+                      child: Text(
+                        "Finalize Registration",
+                        style: TextStyle(
+                          color: ZincColors.background(context),
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
                       ),
                     ),
                   ),
@@ -750,35 +1049,37 @@ class _AttendanceAppState extends State<AttendanceApp> {
     );
   }
 
-  // Helper UI methods
-  Widget _buildTable({
+  // ─── Helper UI ───────────────────────────────────────────────────────────────
+  Widget _buildAnimatedTable({
     required List<String> headers,
-    required List<List<Widget>> rows,
-    bool compact = false,
+    required List<_AnimatedTableRow> rows,
   }) {
     return Container(
       decoration: BoxDecoration(
         border: Border.all(color: ZincColors.border(context)),
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(10),
         color: ZincColors.surface(context),
       ),
-      child: Table(
-        defaultVerticalAlignment: TableCellVerticalAlignment.middle,
-        columnWidths: const {
-          0: IntrinsicColumnWidth(),
-          2: IntrinsicColumnWidth(),
-        },
+      clipBehavior: Clip.hardEdge,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          TableRow(
-            decoration: BoxDecoration(
-              color: ZincColors.text(context).withOpacity(0.04),
-            ),
-            children: headers
-                .map(
-                  (h) => Padding(
-                    padding: const EdgeInsets.all(12),
+          // Header row
+          Container(
+            color: ZincColors.text(context).withOpacity(0.04),
+            child: Row(
+              children: headers.asMap().entries.map((e) {
+                bool isLast = e.key == headers.length - 1;
+                bool isFirst = e.key == 0;
+                return Expanded(
+                  flex: isFirst || isLast ? 0 : 1,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
                     child: Text(
-                      h,
+                      e.value,
                       style: TextStyle(
                         fontSize: 11,
                         fontWeight: FontWeight.w900,
@@ -786,51 +1087,15 @@ class _AttendanceAppState extends State<AttendanceApp> {
                       ),
                     ),
                   ),
-                )
-                .toList(),
-          ),
-          ...rows.map(
-            (row) => TableRow(
-              decoration: BoxDecoration(
-                border: Border(
-                  bottom: BorderSide(
-                    color: ZincColors.border(context),
-                    width: 0.5,
-                  ),
-                ),
-              ),
-              children: row
-                  .map(
-                    (cell) => Padding(
-                      padding: EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: compact ? 8 : 14,
-                      ),
-                      child: cell,
-                    ),
-                  )
-                  .toList(),
+                );
+              }).toList(),
             ),
           ),
+          // Divider
+          Container(height: 0.5, color: ZincColors.border(context)),
+          // Animated rows
+          ...rows,
         ],
-      ),
-    );
-  }
-
-  Widget _buildStatusBadge(String text, bool success) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: success ? const Color(0xFFDCFCE7) : const Color(0xFFFEE2E2),
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: Text(
-        text,
-        style: TextStyle(
-          fontSize: 9,
-          fontWeight: FontWeight.w900,
-          color: success ? const Color(0xFF166534) : const Color(0xFF991B1B),
-        ),
       ),
     );
   }
@@ -840,7 +1105,7 @@ class _AttendanceAppState extends State<AttendanceApp> {
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: ZincColors.surface(context),
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(10),
         border: Border.all(color: ZincColors.border(context)),
       ),
       child: child,
@@ -850,10 +1115,305 @@ class _AttendanceAppState extends State<AttendanceApp> {
   BoxDecoration _fieldBox(BuildContext context) => BoxDecoration(
     color: ZincColors.background(context).withOpacity(0.5),
     border: Border.all(color: ZincColors.border(context)),
-    borderRadius: BorderRadius.circular(8),
+    borderRadius: BorderRadius.circular(10),
   );
 }
 
+// ─── Animated Table Row ───────────────────────────────────────────────────────
+class _AnimatedTableRow extends StatefulWidget {
+  final List<Widget> cells;
+  final int index;
+  final bool compact;
+
+  const _AnimatedTableRow({
+    required this.cells,
+    this.index = 0,
+    this.compact = false,
+  });
+
+  @override
+  State<_AnimatedTableRow> createState() => _AnimatedTableRowState();
+}
+
+class _AnimatedTableRowState extends State<_AnimatedTableRow>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _opacity;
+  late Animation<Offset> _slide;
+
+  @override
+  void initState() {
+    super.initState();
+    final delay = Duration(milliseconds: 60 + widget.index * 35);
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 280),
+    );
+    _opacity = CurvedAnimation(parent: _ctrl, curve: Curves.easeOut);
+    _slide = Tween<Offset>(
+      begin: const Offset(0, 0.05),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeOutCubic));
+    Future.delayed(delay, () {
+      if (mounted) _ctrl.forward();
+    });
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _opacity,
+      child: SlideTransition(
+        position: _slide,
+        child: Container(
+          decoration: BoxDecoration(
+            border: Border(
+              bottom: BorderSide(color: ZincColors.border(context), width: 0.5),
+            ),
+          ),
+          child: Row(
+            children: widget.cells.asMap().entries.map((e) {
+              bool isLast = e.key == widget.cells.length - 1;
+              bool isFirst = e.key == 0;
+              return Expanded(
+                flex: isFirst || isLast ? 0 : 1,
+                child: Padding(
+                  padding: EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: widget.compact ? 10 : 14,
+                  ),
+                  child: e.value,
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Animated Status Card ────────────────────────────────────────────────────
+class _AnimatedStatusCard extends StatelessWidget {
+  final bool isAttOpen;
+  final VoidCallback onStop;
+  final VoidCallback onContinue;
+  final VoidCallback onFreshStart;
+  final BuildContext context;
+
+  const _AnimatedStatusCard({
+    required this.isAttOpen,
+    required this.onStop,
+    required this.onContinue,
+    required this.onFreshStart,
+    required this.context,
+  });
+
+  @override
+  Widget build(BuildContext outerContext) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  "Current State",
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                    color: ZincColors.mutedText(context),
+                    letterSpacing: 0.5,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Row(
+                  children: [
+                    AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 300),
+                      transitionBuilder: (child, anim) => ScaleTransition(
+                        scale: anim,
+                        child: FadeTransition(opacity: anim, child: child),
+                      ),
+                      child: Icon(
+                        isAttOpen
+                            ? CupertinoIcons.circle_fill
+                            : CupertinoIcons.stop_circle,
+                        key: ValueKey(isAttOpen),
+                        size: 10,
+                        color: isAttOpen
+                            ? CupertinoColors.activeGreen
+                            : CupertinoColors.destructiveRed,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 250),
+                      child: Text(
+                        isAttOpen ? "RECORDING" : "STOPPED",
+                        key: ValueKey(isAttOpen),
+                        style: TextStyle(
+                          fontWeight: FontWeight.w900,
+                          fontSize: 18,
+                          color: ZincColors.text(context),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 200),
+              child: isAttOpen
+                  ? _SpringButton(
+                      key: const ValueKey('stop'),
+                      onPressed: onStop,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 10,
+                        ),
+                        decoration: BoxDecoration(
+                          color: CupertinoColors.destructiveRed,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: const Text(
+                          "Stop",
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 13,
+                            color: CupertinoColors.white,
+                          ),
+                        ),
+                      ),
+                    )
+                  : const SizedBox.shrink(key: ValueKey('none')),
+            ),
+          ],
+        ),
+        AnimatedSize(
+          duration: const Duration(milliseconds: 350),
+          curve: Curves.easeOutCubic,
+          child: isAttOpen
+              ? const SizedBox.shrink()
+              : Padding(
+                  padding: const EdgeInsets.only(top: 16),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: _SpringButton(
+                          onPressed: onContinue,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            decoration: BoxDecoration(
+                              color: CupertinoColors.activeGreen,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: const Center(
+                              child: Text(
+                                "Continue",
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13,
+                                  color: CupertinoColors.white,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: _SpringButton(
+                          onPressed: onFreshStart,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            decoration: BoxDecoration(
+                              color: ZincColors.text(context),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Center(
+                              child: Text(
+                                "Fresh Start",
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13,
+                                  color: ZincColors.background(context),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+// ─── Pulsing Icon (for connect screen) ───────────────────────────────────────
+class _PulsingIcon extends StatefulWidget {
+  final IconData icon;
+  final Color color;
+  final double size;
+
+  const _PulsingIcon({
+    required this.icon,
+    required this.color,
+    required this.size,
+  });
+
+  @override
+  State<_PulsingIcon> createState() => _PulsingIconState();
+}
+
+class _PulsingIconState extends State<_PulsingIcon>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _scale;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    )..repeat(reverse: true);
+    _scale = Tween(
+      begin: 0.9,
+      end: 1.1,
+    ).animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut));
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ScaleTransition(
+      scale: _scale,
+      child: Icon(widget.icon, size: widget.size, color: widget.color),
+    );
+  }
+}
+
+// ─── Pulse Dialog ─────────────────────────────────────────────────────────────
 class _PulseDialog extends StatefulWidget {
   const _PulseDialog();
   @override
@@ -877,6 +1437,7 @@ class _PulseDialogState extends State<_PulseDialog>
 
   void _onScanReceived() async {
     if (scanSignal.value != null && mounted) {
+      HapticFeedback.heavyImpact();
       setState(() => isFinished = true);
       _c.stop();
       _c.duration = const Duration(milliseconds: 300);
@@ -903,9 +1464,13 @@ class _PulseDialogState extends State<_PulseDialog>
         : CupertinoIcons.radiowaves_left;
 
     return CupertinoActionSheet(
-      title: Text(
-        isFinished ? "Success!" : "Ready to Sync",
-        style: TextStyle(color: ZincColors.text(context)),
+      title: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 250),
+        child: Text(
+          isFinished ? "Success!" : "Ready to Sync",
+          key: ValueKey(isFinished),
+          style: TextStyle(color: ZincColors.text(context)),
+        ),
       ),
       message: Column(
         children: [
@@ -918,17 +1483,34 @@ class _PulseDialogState extends State<_PulseDialog>
                   : (1.0 + (_c.value * 0.25));
               return Transform.scale(
                 scale: scale,
-                child: Icon(activeIcon, size: 50, color: activeColor),
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 250),
+                  transitionBuilder: (child, anim) => ScaleTransition(
+                    scale: anim,
+                    child: FadeTransition(opacity: anim, child: child),
+                  ),
+                  child: Icon(
+                    activeIcon,
+                    key: ValueKey(isFinished),
+                    size: 50,
+                    color: activeColor,
+                  ),
+                ),
               );
             },
           ),
           const SizedBox(height: 24),
-          Text(
-            isFinished
-                ? "UID Captured: ${scanSignal.value}"
-                : "Tap the student card on the RFID reader.",
-            style: TextStyle(color: ZincColors.mutedText(context)),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 300),
+            child: Text(
+              isFinished
+                  ? "UID Captured: ${scanSignal.value}"
+                  : "Tap the student card on the RFID reader.",
+              key: ValueKey(isFinished),
+              style: TextStyle(color: ZincColors.mutedText(context)),
+            ),
           ),
+          const SizedBox(height: 8),
         ],
       ),
       cancelButton: CupertinoActionSheetAction(
