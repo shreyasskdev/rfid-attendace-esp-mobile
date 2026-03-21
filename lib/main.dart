@@ -77,14 +77,17 @@ class _AttendanceAppState extends State<AttendanceApp> {
           isListeningForCard = false;
         });
         Navigator.pop(context);
-      } else {
+      } else if (isAttOpen) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text("Unknown: $uid"),
+            content: Text("Unknown Card: $uid"),
             backgroundColor: Colors.orange,
           ),
         );
       }
+      // If NOT in session and NOT listening, we just ignore it silently.
+    } else if (msg.startsWith("INFO:")) {
+      // Silently ignore registered cards in standby mode
     } else if (msg.startsWith("LIVE:") || msg.startsWith("TOD:")) {
       if (!msg.contains("END"))
         setState(() => presentToday.add(msg.substring(msg.indexOf(':') + 1)));
@@ -120,7 +123,7 @@ class _AttendanceAppState extends State<AttendanceApp> {
       length: 3,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text("RFID Attendance"),
+          title: const Text("RFID Attendance Pro"),
           backgroundColor: Colors.indigo[900],
           foregroundColor: Colors.white,
           bottom: const TabBar(
@@ -158,7 +161,6 @@ class _AttendanceAppState extends State<AttendanceApp> {
     allStudents.forEach(
       (u, s) => presentToday.contains(u) ? pList.add(s) : aList.add(s),
     );
-
     return Column(
       children: [
         Container(
@@ -183,7 +185,7 @@ class _AttendanceAppState extends State<AttendanceApp> {
                         backgroundColor: Colors.red,
                       ),
                       child: const Text(
-                        "Stop Session",
+                        "Stop",
                         style: TextStyle(color: Colors.white),
                       ),
                     ),
@@ -215,9 +217,7 @@ class _AttendanceAppState extends State<AttendanceApp> {
                       onPressed: () {
                         setState(() => isAttOpen = true);
                         writeChar?.write(utf8.encode("RESUME_ATT"));
-                        writeChar?.write(
-                          utf8.encode("GET_TODAY"),
-                        ); // Fetch existing logs
+                        writeChar?.write(utf8.encode("GET_TODAY"));
                       },
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.blue,
@@ -232,7 +232,7 @@ class _AttendanceAppState extends State<AttendanceApp> {
         Expanded(
           child: ListView(
             children: [
-              _sectionHeader("ABSENT (${aList.length})", Colors.red),
+              _header("ABSENT (${aList.length})", Colors.red),
               ...aList.map(
                 (s) => ListTile(
                   title: Text(s.name),
@@ -240,7 +240,7 @@ class _AttendanceAppState extends State<AttendanceApp> {
                   leading: const Icon(Icons.close, color: Colors.red),
                 ),
               ),
-              _sectionHeader("PRESENT (${pList.length})", Colors.green),
+              _header("PRESENT (${pList.length})", Colors.green),
               ...pList.map(
                 (s) => ListTile(
                   title: Text(s.name),
@@ -294,7 +294,7 @@ class _AttendanceAppState extends State<AttendanceApp> {
               const SizedBox(width: 10),
               ElevatedButton(
                 onPressed: _showScanDialog,
-                child: const Text("Scan Card"),
+                child: const Text("Scan"),
               ),
             ],
           ),
@@ -319,14 +319,10 @@ class _AttendanceAppState extends State<AttendanceApp> {
             child: const Text("Register Student"),
           ),
           const Divider(height: 40),
-          const Text(
-            "Registered Students",
-            style: TextStyle(fontWeight: FontWeight.bold),
-          ),
           ...allStudents.values.map(
             (s) => ListTile(
               title: Text(s.name),
-              subtitle: Text("Roll: ${s.roll} | ID: ${s.uid}"),
+              subtitle: Text(s.uid),
               trailing: IconButton(
                 icon: const Icon(Icons.delete, color: Colors.red),
                 onPressed: () {
@@ -369,10 +365,8 @@ class _AttendanceAppState extends State<AttendanceApp> {
           child: ListView.builder(
             itemCount: historyLogs.length,
             itemBuilder: (c, i) => ListTile(
-              title: Text(
-                allStudents[historyLogs[i]]?.name ?? "Unknown Student",
-              ),
-              subtitle: Text("UID: ${historyLogs[i]}"),
+              title: Text(allStudents[historyLogs[i]]?.name ?? "Unknown"),
+              subtitle: Text(historyLogs[i]),
               leading: const Icon(Icons.history),
             ),
           ),
@@ -381,8 +375,8 @@ class _AttendanceAppState extends State<AttendanceApp> {
     );
   }
 
-  Widget _sectionHeader(String t, Color c) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+  Widget _header(String t, Color c) => Container(
+    padding: const EdgeInsets.all(8),
     width: double.infinity,
     color: c.withOpacity(0.1),
     child: Text(
@@ -420,7 +414,7 @@ class _PulseDialogState extends State<_PulseDialog>
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text("Card Registration"),
+      title: const Text("Registration Mode"),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -429,7 +423,7 @@ class _PulseDialogState extends State<_PulseDialog>
             child: const Icon(Icons.nfc, size: 80, color: Colors.indigo),
           ),
           const SizedBox(height: 20),
-          const Text("Tap the card on the reader now..."),
+          const Text("Scan NEW card now"),
         ],
       ),
       actions: [
