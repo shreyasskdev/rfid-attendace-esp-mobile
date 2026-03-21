@@ -1,5 +1,5 @@
-import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
@@ -19,19 +19,32 @@ class _AttendanceAppState extends State<AttendanceApp> {
   List<String> liveLogs = [];
   List<String> historyLogs = [];
   String detectedUID = "Scan a card...";
+  bool isConnecting = false;
+
   final TextEditingController nameC = TextEditingController();
   final TextEditingController rollC = TextEditingController();
+
+  // Security Key (Must match ESP32)
+  final String adminKey = "SECURE123";
 
   final String serviceUuid = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
   final String notifyUuid = "6d680001-70b3-4000-8000-000000000000";
   final String writeUuid = "6d680002-70b3-4000-8000-000000000000";
 
   void connect() async {
+    setState(() => isConnecting = true);
     FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
-    FlutterBluePlus.scanResults.listen((results) {
+
+    var subscription = FlutterBluePlus.scanResults.listen((results) async {
       for (ScanResult r in results) {
         if (r.device.platformName == "ESP32_Attendance") {
-          r.device.connect(license: License.free).then((_) async {
+          FlutterBluePlus.stopScan();
+          try {
+            await r.device.connect(license: License.free);
+
+            // IMPROVEMENT: Request MTU for long strings
+            if (Platform.isAndroid) await r.device.requestMtu(255);
+
             List<BluetoothService> services = await r.device.discoverServices();
             for (var s in services) {
               if (s.uuid.toString() == serviceUuid) {
@@ -44,12 +57,19 @@ class _AttendanceAppState extends State<AttendanceApp> {
                 }
               }
             }
-            // SYNC TIME AUTOMATICALLY
+
+            // SYNC TIME
             String timeCmd =
                 "TIME:${DateTime.now().millisecondsSinceEpoch ~/ 1000}";
-            writeChar?.write(utf8.encode(timeCmd));
-            setState(() => espDevice = r.device);
-          });
+            await writeChar?.write(utf8.encode(timeCmd));
+
+            setState(() {
+              espDevice = r.device;
+              isConnecting = false;
+            });
+          } catch (e) {
+            setState(() => isConnecting = false);
+          }
         }
       }
     });
@@ -57,16 +77,22 @@ class _AttendanceAppState extends State<AttendanceApp> {
 
   void handleData(List<int> data) {
     String msg = utf8.decode(data);
-    if (msg.startsWith("NEW_UID:"))
+    if (msg.startsWith("NEW_UID:")) {
       setState(() => detectedUID = msg.substring(8));
-    else if (msg == "END_HISTORY")
+    } else if (msg == "END_HISTORY") {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text("Sync Complete")));
-    else if (msg.startsWith("PRESENT:"))
-      setState(() => liveLogs.insert(0, "Live: ${msg.substring(8)}"));
-    else
-      setState(() => historyLogs.insert(0, msg)); // Full history lines
+    } else if (msg.startsWith("PRESENT:")) {
+      setState(
+        () => liveLogs.insert(
+          0,
+          "${DateTime.now().hour}:${DateTime.now().minute} - ${msg.substring(8)}",
+        ),
+      );
+    } else {
+      setState(() => historyLogs.insert(0, msg));
+    }
   }
 
   @override
@@ -75,37 +101,55 @@ class _AttendanceAppState extends State<AttendanceApp> {
       length: 2,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text("RFID Attendance"),
-          backgroundColor: Colors.blueGrey[900],
+          title: const Text("RFID Attendance Pro"),
+          backgroundColor: Colors.indigo[900],
           foregroundColor: Colors.white,
           bottom: const TabBar(
             tabs: [
-              Tab(text: "Register & Live"),
-              Tab(text: "Full History"),
+              Tab(text: "Register"),
+              Tab(text: "History"),
             ],
           ),
         ),
-        body: TabBarView(children: [_buildRegisterTab(), _buildHistoryTab()]),
+        body: isConnecting
+            ? const Center(child: CircularProgressIndicator())
+            : TabBarView(children: [_buildRegisterTab(), _buildHistoryTab()]),
       ),
     );
   }
 
   Widget _buildRegisterTab() {
-    return Padding(
+    return SingleChildScrollView(
       padding: const EdgeInsets.all(16.0),
       child: Column(
         children: [
           if (espDevice == null)
-            ElevatedButton(
+            ElevatedButton.icon(
               onPressed: connect,
-              child: const Text("Connect to System"),
+              icon: const Icon(Icons.bluetooth),
+              label: const Text("Connect System"),
             ),
-          Text(
-            "UID: $detectedUID",
-            style: const TextStyle(
-              fontWeight: FontWeight.bold,
-              fontSize: 18,
-              color: Colors.blue,
+          const SizedBox(height: 20),
+          Card(
+            color: Colors.blueGrey[50],
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                children: [
+                  Text(
+                    "Detected UID",
+                    style: TextStyle(color: Colors.grey[600]),
+                  ),
+                  Text(
+                    detectedUID,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 22,
+                      color: Colors.indigo,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
           TextField(
@@ -114,23 +158,39 @@ class _AttendanceAppState extends State<AttendanceApp> {
           ),
           TextField(
             controller: rollC,
-            decoration: const InputDecoration(labelText: "Roll No"),
+            decoration: const InputDecoration(labelText: "Roll Number"),
           ),
+          const SizedBox(height: 20),
           ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              minimumSize: const Size.fromHeight(50),
+            ),
             onPressed: () {
-              writeChar?.write(
-                utf8.encode("ADD:${detectedUID},${nameC.text},${rollC.text}"),
-              );
+              if (detectedUID.contains("Scan")) return;
+              // SECURITY: Sending Key + Data
+              String cmd =
+                  "ADD:$adminKey,$detectedUID,${nameC.text},${rollC.text}";
+              writeChar?.write(utf8.encode(cmd));
               nameC.clear();
               rollC.clear();
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text("Registration Sent")),
+              );
             },
-            child: const Text("Register Student"),
+            child: const Text("Register / Update Student"),
           ),
-          const Divider(),
-          const Text("Live Scans:"),
-          Expanded(
-            child: ListView(
-              children: liveLogs.map((e) => ListTile(title: Text(e))).toList(),
+          const Divider(height: 40),
+          const Text(
+            "Recent Scans",
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+          ListView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            itemCount: liveLogs.length,
+            itemBuilder: (c, i) => ListTile(
+              leading: const Icon(Icons.person, color: Colors.green),
+              title: Text(liveLogs[i]),
             ),
           ),
         ],
@@ -141,32 +201,34 @@ class _AttendanceAppState extends State<AttendanceApp> {
   Widget _buildHistoryTab() {
     return Column(
       children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-          children: [
-            ElevatedButton(
-              onPressed: () {
-                setState(() => historyLogs.clear());
-                writeChar?.write(utf8.encode("GET_HISTORY"));
-              },
-              child: const Text("Sync History from ESP32"),
-            ),
-            ElevatedButton(
-              onPressed: () => writeChar?.write(utf8.encode("CLEAR_LOGS")),
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-              child: const Text(
-                "Clear ESP32 Logs",
-                style: TextStyle(color: Colors.white),
+        Padding(
+          padding: const EdgeInsets.all(8.0),
+          child: Row(
+            children: [
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: () {
+                    setState(() => historyLogs.clear());
+                    writeChar?.write(utf8.encode("GET_HISTORY"));
+                  },
+                  child: const Text("Sync History"),
+                ),
               ),
-            ),
-          ],
+              const SizedBox(width: 10),
+              ElevatedButton(
+                onPressed: () => writeChar?.write(utf8.encode("CLEAR_LOGS")),
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                child: const Icon(Icons.delete, color: Colors.white),
+              ),
+            ],
+          ),
         ),
         Expanded(
-          child: ListView.builder(
+          child: ListView.separated(
             itemCount: historyLogs.length,
+            separatorBuilder: (c, i) => const Divider(height: 1),
             itemBuilder: (c, i) => ListTile(
-              leading: const Icon(Icons.history),
-              title: Text(historyLogs[i]),
+              title: Text(historyLogs[i], style: const TextStyle(fontSize: 13)),
             ),
           ),
         ),
