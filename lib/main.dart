@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
@@ -299,7 +300,7 @@ class AttendanceApp extends StatefulWidget {
 }
 
 class _AttendanceAppState extends State<AttendanceApp>
-    with TickerProviderStateMixin {
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   BluetoothDevice? dev;
   BluetoothCharacteristic? writeChar;
   Map<String, Student> allStudents = {};
@@ -307,6 +308,8 @@ class _AttendanceAppState extends State<AttendanceApp>
   List<Student> historyResults = [];
   bool isAttOpen = true, isConnecting = false, isHistorySyncing = false;
   String detectedUID = "---";
+  StreamSubscription? _connectionSub;
+  StreamSubscription? _scanSub;
 
   // Track removals for exit animation
   final Set<String> _removingStudents = {};
@@ -321,6 +324,8 @@ class _AttendanceAppState extends State<AttendanceApp>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    themeNotifier.addListener(_onThemeChanged);
     _syncRotationController =
         AnimationController(
           vsync: this,
@@ -332,19 +337,35 @@ class _AttendanceAppState extends State<AttendanceApp>
         });
   }
 
+  void _onThemeChanged() => setState(() {});
+
   @override
   void dispose() {
+    _scanSub?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    _connectionSub?.cancel();
+    themeNotifier.removeListener(_onThemeChanged);
     _syncRotationController.dispose();
     super.dispose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.detached ||
+        state == AppLifecycleState.paused) {
+      dev?.disconnect();
+    }
+  }
+
+  // Replace your connect() method
   void connect() async {
     HapticFeedback.mediumImpact();
     setState(() => isConnecting = true);
     FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
-    FlutterBluePlus.scanResults.listen((results) async {
+    _scanSub = FlutterBluePlus.scanResults.listen((results) async {
       for (ScanResult r in results) {
         if (r.device.platformName == "ESP32_Attendance") {
+          _scanSub?.cancel();
           FlutterBluePlus.stopScan();
           await r.device.connect(license: License.free);
           if (Platform.isAndroid) await r.device.requestMtu(255);
@@ -358,6 +379,23 @@ class _AttendanceAppState extends State<AttendanceApp>
               if (c.uuid.toString().contains("0002")) writeChar = c;
             }
           }
+          _connectionSub = r.device.connectionState.listen((state) {
+            if (state == BluetoothConnectionState.disconnected) {
+              setState(() {
+                dev = null;
+                writeChar = null;
+                presentToday.clear();
+                allStudents.clear();
+                historyResults.clear();
+                isAttOpen = true;
+                detectedUID = "---";
+                isConnecting = false;
+                _isSyncing = false;
+              });
+              _syncRotationController.stop();
+              HapticFeedback.heavyImpact();
+            }
+          });
           syncEverything();
           setState(() {
             dev = r.device;
@@ -366,6 +404,21 @@ class _AttendanceAppState extends State<AttendanceApp>
         }
       }
     });
+
+    // Auto-cancel if scan times out and nothing found
+    Future.delayed(const Duration(seconds: 6), () {
+      if (isConnecting && mounted) {
+        setState(() => isConnecting = false);
+      }
+    });
+  }
+
+  // Add cancel method
+  void cancelConnect() {
+    _scanSub?.cancel();
+    FlutterBluePlus.stopScan();
+    HapticFeedback.lightImpact();
+    setState(() => isConnecting = false);
   }
 
   void syncEverything() {
@@ -456,7 +509,7 @@ class _AttendanceAppState extends State<AttendanceApp>
         return CupertinoPageScaffold(
           backgroundColor: ZincColors.background(context),
           navigationBar: CupertinoNavigationBar(
-            backgroundColor: ZincColors.surface(context).withOpacity(0.92),
+            backgroundColor: ZincColors.surface(context).withAlpha(234),
             border: Border(
               bottom: BorderSide(color: ZincColors.border(context), width: 0.5),
             ),
@@ -491,22 +544,28 @@ class _AttendanceAppState extends State<AttendanceApp>
             trailing: dev != null
                 ? CupertinoButton(
                     padding: EdgeInsets.zero,
-                    child: AnimatedBuilder(
-                      animation: _syncRotationController,
-                      builder: (context, child) => Transform.rotate(
-                        angle: _syncRotationController.value * 2 * 3.14159,
-                        child: Icon(
-                          CupertinoIcons.refresh,
-                          size: 20,
-                          color: _isSyncing
-                              ? ZincColors.text(context)
-                              : ZincColors.mutedText(context),
-                        ),
-                      ),
-                    ),
                     onPressed: () {
                       if (!_isSyncing) syncEverything();
                     },
+                    child: AnimatedBuilder(
+                      animation: _syncRotationController,
+                      builder: (context, _) => Transform.rotate(
+                        angle: _syncRotationController.value * 2 * math.pi,
+                        child: SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: Icon(
+                            _isSyncing
+                                ? CupertinoIcons.arrow_2_circlepath_circle_fill
+                                : CupertinoIcons.arrow_2_circlepath,
+                            size: 20,
+                            color: _isSyncing
+                                ? ZincColors.text(context)
+                                : ZincColors.mutedText(context),
+                          ),
+                        ),
+                      ),
+                    ),
                   )
                 : null,
           ),
@@ -550,32 +609,55 @@ class _AttendanceAppState extends State<AttendanceApp>
           _SpringButton(
             onPressed: isConnecting ? null : connect,
             child: AnimatedContainer(
-              duration: const Duration(milliseconds: 250),
-              curve: Curves.easeOutCubic,
+              duration: const Duration(milliseconds: 260),
+              curve: Curves.easeInOutCubicEmphasized,
+              height: 48,
+              width: isConnecting ? 48 : 190,
+              alignment: Alignment.center,
               decoration: BoxDecoration(
                 color: ZincColors.text(context),
-                borderRadius: BorderRadius.circular(14),
+                borderRadius: BorderRadius.circular(isConnecting ? 24 : 14),
               ),
-              padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 14),
               child: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 200),
+                duration: const Duration(milliseconds: 150),
+                transitionBuilder: (child, animation) =>
+                    FadeTransition(opacity: animation, child: child),
                 child: isConnecting
-                    ? const SizedBox(
-                        width: 120,
-                        child: Center(
-                          child: CupertinoActivityIndicator(
-                            color: CupertinoColors.white,
+                    ? CupertinoActivityIndicator(
+                        key: const ValueKey("loader"),
+                        color: ZincColors.background(context),
+                      )
+                    : Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 20),
+                        child: Text(
+                          "Connect Scanner",
+                          key: const ValueKey('label'),
+                          maxLines: 1,
+                          softWrap: false,
+                          overflow: TextOverflow.fade,
+                          style: AppTextStyles.title(context).copyWith(
+                            color: ZincColors.background(context),
+                            fontSize: 16,
                           ),
                         ),
-                      )
-                    : Text(
-                        "Connect Scanner",
-                        key: const ValueKey('label'),
-                        style: AppTextStyles.title(context).copyWith(
-                          color: ZincColors.background(context),
-                          fontSize: 16,
-                        ),
                       ),
+              ),
+            ),
+          ),
+          // ← Cancel button fades in while connecting
+          AnimatedOpacity(
+            duration: const Duration(milliseconds: 250),
+            opacity: isConnecting ? 1.0 : 0.0,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 16),
+              child: CupertinoButton(
+                onPressed: isConnecting ? cancelConnect : null,
+                child: Text(
+                  "Cancel",
+                  style: AppTextStyles.body(
+                    context,
+                  ).copyWith(color: ZincColors.mutedText(context)),
+                ),
               ),
             ),
           ),
@@ -681,18 +763,18 @@ class _AttendanceAppState extends State<AttendanceApp>
                       Text(s.roll, style: AppTextStyles.body(context)),
                       CupertinoButton(
                         padding: EdgeInsets.zero,
-                        minSize: 28,
-                        child: const Icon(
-                          CupertinoIcons.trash,
-                          size: 16,
-                          color: CupertinoColors.destructiveRed,
-                        ),
                         onPressed: isRemoving
                             ? null
                             : () async {
                                 HapticFeedback.mediumImpact();
                                 setState(() => _removingStudents.add(s.uid));
                               },
+                        minimumSize: Size(28, 28),
+                        child: const Icon(
+                          CupertinoIcons.trash,
+                          size: 16,
+                          color: CupertinoColors.destructiveRed,
+                        ),
                       ),
                     ],
                     isRemoving: isRemoving,
@@ -727,7 +809,7 @@ class _AttendanceAppState extends State<AttendanceApp>
                   borderRadius: BorderRadius.circular(32),
                   boxShadow: [
                     BoxShadow(
-                      color: ZincColors.text(context).withOpacity(0.25),
+                      color: ZincColors.text(context).withAlpha(63),
                       blurRadius: 16,
                       offset: const Offset(0, 4),
                     ),
@@ -971,13 +1053,13 @@ class _AttendanceAppState extends State<AttendanceApp>
                       ),
                       CupertinoButton(
                         padding: EdgeInsets.zero,
-                        minSize: 30,
+                        onPressed: () => Navigator.pop(context),
+                        minimumSize: Size(30, 30),
                         child: Icon(
                           CupertinoIcons.xmark_circle_fill,
                           color: ZincColors.mutedText(context),
                           size: 26,
                         ),
-                        onPressed: () => Navigator.pop(context),
                       ),
                     ],
                   ),
@@ -1009,9 +1091,7 @@ class _AttendanceAppState extends State<AttendanceApp>
                     curve: Curves.easeOutCubic,
                     padding: const EdgeInsets.all(14),
                     decoration: BoxDecoration(
-                      color: detectedUID != "---"
-                          ? const Color(0xFFDCFCE7)
-                          : ZincColors.background(context).withOpacity(0.5),
+                      color: ZincColors.background(context).withAlpha(127),
                       border: Border.all(
                         color: detectedUID != "---"
                             ? const Color(0xFF86EFAC)
@@ -1049,20 +1129,13 @@ class _AttendanceAppState extends State<AttendanceApp>
                               key: ValueKey(detectedUID),
                               style: AppTextStyles.body(context).copyWith(
                                 fontFamily: 'Courier',
-                                color: detectedUID == "---"
-                                    ? ZincColors.mutedText(context)
-                                    : const Color(0xFF166534),
+                                color: ZincColors.mutedText(context),
                               ),
                             ),
                           ),
                         ),
                         CupertinoButton(
                           padding: EdgeInsets.zero,
-                          minSize: 30,
-                          child: Text(
-                            detectedUID == "---" ? "Scan Card" : "Rescan",
-                            style: const TextStyle(fontWeight: FontWeight.bold),
-                          ),
                           onPressed: () async {
                             writeChar?.write(utf8.encode("PREP_REG"));
                             await showCupertinoModalPopup(
@@ -1073,6 +1146,11 @@ class _AttendanceAppState extends State<AttendanceApp>
                               () => detectedUID = scanSignal.value ?? "---",
                             );
                           },
+                          minimumSize: Size(30, 30),
+                          child: Text(
+                            detectedUID == "---" ? "Scan Card" : "Rescan",
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
                         ),
                       ],
                     ),
@@ -1098,7 +1176,7 @@ class _AttendanceAppState extends State<AttendanceApp>
                       padding: const EdgeInsets.symmetric(vertical: 15),
                       decoration: BoxDecoration(
                         color: detectedUID == "---"
-                            ? ZincColors.mutedText(context).withOpacity(0.4)
+                            ? ZincColors.mutedText(context).withAlpha(102)
                             : ZincColors.text(context),
                         borderRadius: BorderRadius.circular(12),
                       ),
@@ -1137,7 +1215,7 @@ class _AttendanceAppState extends State<AttendanceApp>
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Container(
-            color: ZincColors.text(context).withOpacity(0.04),
+            color: ZincColors.text(context).withAlpha(10),
             child: Row(
               children: headers.asMap().entries.map((e) {
                 bool isLast = e.key == headers.length - 1;
@@ -1181,7 +1259,7 @@ class _AttendanceAppState extends State<AttendanceApp>
   }
 
   BoxDecoration _fieldBox(BuildContext context) => BoxDecoration(
-    color: ZincColors.background(context).withOpacity(0.5),
+    color: ZincColors.background(context).withAlpha(127),
     border: Border.all(color: ZincColors.border(context)),
     borderRadius: BorderRadius.circular(10),
   );
@@ -1635,14 +1713,14 @@ class _PulseDialogState extends State<_PulseDialog>
         ],
       ),
       cancelButton: CupertinoActionSheetAction(
+        isDestructiveAction: true,
+        onPressed: () => Navigator.pop(context),
         child: Text(
           "Cancel",
           style: AppTextStyles.body(
             context,
           ).copyWith(color: ZincColors.text(context)),
         ),
-        isDestructiveAction: true,
-        onPressed: () => Navigator.pop(context),
       ),
     );
   }
