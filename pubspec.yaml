@@ -49,8 +49,6 @@ names_launcher:
       enable: true
     ios:
       enable: true
-    linux:
-      enable: true
 
 dev_dependencies:
   flutter_test:
